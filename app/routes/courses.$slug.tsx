@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { z } from "zod";
 import type { Route } from "./+types/courses.$slug";
 import { getCurrentUserId } from "~/lib/session";
+import { isEnrolled } from "~/lib/enrollments.server";
 import { db } from "~/db";
 import {
   courses,
@@ -11,7 +12,6 @@ import {
   users,
   modules,
   lessons,
-  enrollments,
   lessonProgress,
   courseRatings,
   purchases,
@@ -49,7 +49,10 @@ import {
   calculatePppPrice,
   getCountryTierInfo,
 } from "~/lib/ppp";
-import { checkRefundRequestEligibility } from "~/lib/refund-requests.server";
+import {
+  checkRefundRequestEligibility,
+  findIndividualPurchase,
+} from "~/lib/refund-requests.server";
 import { parseFormData } from "~/lib/validation";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
 import { StarRating, StarRatingInput } from "~/components/star-rating";
@@ -131,17 +134,6 @@ function getLessonCountForCourse(courseId: number) {
     .get();
 
   return count?.count ?? 0;
-}
-
-function isUserEnrolled(userId: number, courseId: number) {
-  const enrollment = db
-    .select()
-    .from(enrollments)
-    .where(
-      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
-    )
-    .get();
-  return !!enrollment;
 }
 
 function getCourseLessonIds(courseId: number): number[] {
@@ -367,11 +359,11 @@ function rateCourse(userId: number, courseId: number, rating: number) {
  * What the Purchaser is offered if they want to raise a Refund Request, or
  * null if this Purchase is not eligible for one.
  */
-function getRefundRequestOffer(
-  userId: number,
-  course: { id: number; price: number }
-) {
-  const eligibility = checkRefundRequestEligibility(userId, course);
+function getRefundRequestOffer(userId: number, courseId: number) {
+  const purchase = findIndividualPurchase(userId, courseId);
+  if (!purchase) return null;
+
+  const eligibility = checkRefundRequestEligibility(userId, purchase.id);
   if (!eligibility.eligible) return null;
 
   return {
@@ -416,13 +408,10 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     null;
 
   if (currentUserId) {
-    enrolled = isUserEnrolled(currentUserId, course.id);
+    enrolled = isEnrolled(currentUserId, course.id);
 
     if (enrolled) {
-      refundRequestOffer = getRefundRequestOffer(currentUserId, {
-        id: course.id,
-        price: courseWithDetails.price,
-      });
+      refundRequestOffer = getRefundRequestOffer(currentUserId, course.id);
 
       progress = calculateProgress(currentUserId, course.id, false);
 
@@ -484,7 +473,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("Course not found", { status: 404 });
   }
 
-  if (!isUserEnrolled(currentUserId, course.id)) {
+  if (!isEnrolled(currentUserId, course.id)) {
     throw data("You must be enrolled in this course to rate it.", {
       status: 403,
     });

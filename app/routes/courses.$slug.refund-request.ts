@@ -1,20 +1,16 @@
 import { data, redirect } from "react-router";
 import { z } from "zod";
 import type { Route } from "./+types/courses.$slug.refund-request";
-import { getCurrentUserId } from "~/lib/session";
 import { db } from "~/db";
-import {
-  courses,
-  refundRequests,
-  users,
-  RefundRequestStatus,
-} from "~/db/schema";
+import { courses } from "~/db/schema";
 import { eq } from "drizzle-orm";
+import { requireUserId } from "~/lib/access.server";
 import { parseFormData, parseParams } from "~/lib/validation";
-import { formatPrice } from "~/lib/utils";
+import { SUPPORT_EMAIL } from "~/lib/emails";
 import {
-  checkRefundRequestEligibility,
+  findIndividualPurchase,
   REFUND_REQUEST_WINDOW_DAYS,
+  submitRefundRequest,
   type RefundRequestIneligibility,
 } from "~/lib/refund-requests.server";
 
@@ -28,6 +24,9 @@ const refundRequestActionSchema = z.object({
     .trim()
     .min(10, "Tell us a little more about why you want a refund.")
     .max(1000, "Please keep your reason under 1000 characters."),
+  // Sent by /team for a Team Purchase. Without it, the request is for the
+  // Purchaser's own purchase of the course.
+  purchaseId: z.coerce.number().int().positive().optional(),
 });
 
 const INELIGIBLE_RESPONSES: Record<
@@ -39,9 +38,21 @@ const INELIGIBLE_RESPONSES: Record<
     message: "You already have an open refund request for this purchase.",
     status: 409,
   },
+  approved_refund_request: {
+    message: "A refund for this purchase has already been approved.",
+    status: 409,
+  },
+  declined_refund_request: {
+    message: `Your refund request for this purchase was declined. Please email ${SUPPORT_EMAIL} if you would like to talk about it.`,
+    status: 409,
+  },
   redeemed_seat_code: {
     message:
       "A refund cannot be requested once a seat code from this purchase has been redeemed.",
+    status: 403,
+  },
+  previously_refunded: {
+    message: `You have been refunded for this course before, so this purchase is not eligible for a self-service refund. Please email ${SUPPORT_EMAIL}.`,
     status: 403,
   },
   outside_window: {
@@ -63,61 +74,14 @@ function getCourseBySlug(slug: string) {
   return db.select().from(courses).where(eq(courses.slug, slug)).get();
 }
 
-/**
- * The confirmation the Purchaser gets in their inbox. There is no mail
- * transport wired up yet, so the built message goes to the server log.
- */
-function buildRefundRequestEmail(input: {
-  purchaserName: string;
-  purchaserEmail: string;
-  courseTitle: string;
-  amount: number;
-}) {
-  return {
-    to: input.purchaserEmail,
-    subject: `Refund request received — ${input.courseTitle}`,
-    body: [
-      `Hi ${input.purchaserName},`,
-      "",
-      `We have received your refund request for "${input.courseTitle}".`,
-      `The refund request is for ${formatPrice(input.amount)}, the amount you paid.`,
-      "",
-      "Our team reviews every refund request by hand. You do not need to do anything else — we will email you again once we have made a decision.",
-      "",
-      "— The Cadence team",
-    ].join("\n"),
-  };
-}
-
 export async function action({ params, request }: Route.ActionArgs) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("You must be logged in to request a refund.", { status: 401 });
-  }
+  const currentUserId = await requireUserId(request);
 
   const { slug } = parseParams(params, refundRequestParamsSchema);
   const course = getCourseBySlug(slug);
 
   if (!course) {
     throw data("Course not found", { status: 404 });
-  }
-
-  const purchaser = db
-    .select()
-    .from(users)
-    .where(eq(users.id, currentUserId))
-    .get();
-
-  if (!purchaser) {
-    throw data("User not found", { status: 404 });
-  }
-
-  const eligibility = checkRefundRequestEligibility(currentUserId, course);
-
-  if (!eligibility.eligible) {
-    const { message, status } = INELIGIBLE_RESPONSES[eligibility.reason];
-    throw data(message, { status });
   }
 
   const formData = await request.formData();
@@ -127,26 +91,25 @@ export async function action({ params, request }: Route.ActionArgs) {
     return data({ errors: parsed.errors }, { status: 400 });
   }
 
-  db
-    .insert(refundRequests)
-    .values({
-      purchaseId: eligibility.purchase.id,
-      status: RefundRequestStatus.Open,
-      reason: parsed.data.reason,
-    })
-    .returning()
-    .get();
+  const isTeamRequest = parsed.data.purchaseId !== undefined;
+  const purchaseId =
+    parsed.data.purchaseId ??
+    findIndividualPurchase(currentUserId, course.id)?.id;
 
-  const email = buildRefundRequestEmail({
-    purchaserName: purchaser.name,
-    purchaserEmail: purchaser.email,
-    courseTitle: course.title,
-    amount: eligibility.amount,
-  });
+  if (purchaseId === undefined) {
+    throw data(INELIGIBLE_RESPONSES.no_purchase.message, { status: 403 });
+  }
 
-  console.log(
-    `[email] to=${email.to} subject=${email.subject}\n${email.body}`
+  const result = submitRefundRequest(
+    currentUserId,
+    purchaseId,
+    parsed.data.reason
   );
 
-  return redirect("/settings");
+  if (!result.ok) {
+    const { message, status } = INELIGIBLE_RESPONSES[result.reason];
+    throw data(message, { status });
+  }
+
+  return redirect(isTeamRequest ? "/team" : `/courses/${slug}`);
 }

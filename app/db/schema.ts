@@ -37,6 +37,12 @@ export enum RefundRequestStatus {
   Declined = "declined",
 }
 
+export enum RefundStatus {
+  Pending = "pending",
+  Issued = "issued",
+  Failed = "failed",
+}
+
 export enum TeamMemberRole {
   Admin = "admin",
   Member = "member",
@@ -132,6 +138,9 @@ export const enrollments = sqliteTable(
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
     completedAt: text("completed_at"),
+    // Set when an Issued Refund ends Content Access. The row is kept so access
+    // can be restored with its Lesson Progress — see ADR 0001.
+    revokedAt: text("revoked_at"),
   },
   (table) => [index("enrollments_course_idx").on(table.courseId)]
 );
@@ -242,8 +251,20 @@ export const refundRequests = sqliteTable(
       .default(RefundRequestStatus.Open),
     // The Purchaser's own words, in the box on the course page.
     reason: text("reason").notNull(),
-    // Null until someone approves — a Declined Refund Request refunds nothing.
-    amountRefunded: integer("amount_refunded"),
+    // The amount promised to the Purchaser, worked out from the Amount Paid
+    // when the request is submitted (or when a Refund Override is approved).
+    // See ADR 0002.
+    amount: integer("amount").notNull(),
+    // Per-seat breakdown for a Team Purchase with Redeemed seats. Null when
+    // the whole Amount Paid is refunded.
+    seatBreakdown: text("seat_breakdown", { mode: "json" }).$type<
+      SeatBreakdownEntry[]
+    >(),
+    // Shown to the Purchaser when the request is Declined.
+    declineReason: text("decline_reason"),
+    // Null until the request is Approved; then Pending, Issued or Failed.
+    refundStatus: text("refund_status").$type<RefundStatus>(),
+    refundStatusAt: text("refund_status_at"),
     requestedAt: text("requested_at")
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
@@ -252,6 +273,16 @@ export const refundRequests = sqliteTable(
   },
   (table) => [index("refunds_purchase_idx").on(table.purchaseId)]
 );
+
+export type SeatBreakdownEntry = {
+  couponId: number;
+  holderUserId: number | null;
+  /** Null for an unredeemed seat. */
+  holderName: string | null;
+  refunded: boolean;
+  /** A friendly explanation when the seat is not refunded. */
+  reason: string | null;
+};
 
 export const teams = sqliteTable("teams", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -288,6 +319,8 @@ export const coupons = sqliteTable("coupons", {
     .references(() => purchases.id),
   redeemedByUserId: integer("redeemed_by_user_id").references(() => users.id),
   redeemedAt: text("redeemed_at"),
+  // Set when a Refund for this seat is Issued. The code can never be Redeemed.
+  invalidatedAt: text("invalidated_at"),
   createdAt: text("created_at")
     .notNull()
     .$defaultFn(() => new Date().toISOString()),

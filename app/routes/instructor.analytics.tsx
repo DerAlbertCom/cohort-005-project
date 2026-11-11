@@ -2,6 +2,7 @@ import { Link, isRouteErrorResponse, useSearchParams } from "react-router";
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import type { Route } from "./+types/instructor.analytics";
 import { requireInstructorOrAdmin } from "~/lib/access.server";
+import { isActiveEnrollment } from "~/lib/enrollments.server";
 import {
   and,
   count,
@@ -241,7 +242,12 @@ function getStudentRevenue(
     .from(enrollments)
     .innerJoin(courses, eq(enrollments.courseId, courses.id))
     .innerJoin(users, eq(users.id, enrollments.userId))
-    .where(scopeOn(enrollments.enrolledAt, instructorId, range))
+    .where(
+      and(
+        scopeOn(enrollments.enrolledAt, instructorId, range),
+        isActiveEnrollment
+      )
+    )
     .orderBy(users.name)
     .all();
 
@@ -358,7 +364,7 @@ function getTopBuyers(
   const seatsByUser = new Map(seats.map((row) => [row.userId, row]));
 
   // No range here: "never enrolled" is a fact about the person, not about the
-  // last thirty days.
+  // last thirty days. Revoked Enrollments count too: a refunded buyer did enrol.
   const enrolled = new Set(
     db
       .selectDistinct({ userId: enrollments.userId })
@@ -508,7 +514,7 @@ function getCourseProgressSummary(courseId: number): CourseProgressSummary {
         inArray(lessonProgress.lessonId, courseLessonIds(courseId))
       )
     )
-    .where(eq(enrollments.courseId, courseId))
+    .where(and(eq(enrollments.courseId, courseId), isActiveEnrollment))
     .groupBy(enrollments.userId)
     .all();
 
@@ -546,7 +552,7 @@ function getCourseDropOff(courseId: number): CourseFunnel {
   const enrolled = db
     .select({ enrolledCount: countDistinct(enrollments.userId) })
     .from(enrollments)
-    .where(eq(enrollments.courseId, courseId))
+    .where(and(eq(enrollments.courseId, courseId), isActiveEnrollment))
     .get();
 
   const enrolledCount = enrolled?.enrolledCount ?? 0;
@@ -583,7 +589,8 @@ function getCourseDropOff(courseId: number): CourseFunnel {
       enrollments,
       and(
         eq(enrollments.userId, lessonProgress.userId),
-        eq(enrollments.courseId, courseId)
+        eq(enrollments.courseId, courseId),
+        isActiveEnrollment
       )
     )
     .where(
