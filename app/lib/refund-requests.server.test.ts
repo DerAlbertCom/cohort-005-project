@@ -411,6 +411,18 @@ describe("Refund Override", () => {
     expect(isReadOnly(base.user.id, base.course.id)).toBe(true);
   });
 
+  it("does not refund a purchase made after an earlier Issued Refund", () => {
+    const first = buyIndividually(base.user.id);
+    const request = openRequest(base.user.id, first.id);
+    approveRefundRequest(request.id, admin.id);
+    markRefundIssued(request.id);
+    const second = buyIndividually(base.user.id);
+
+    expect(createRefundOverride(second.id, admin.id, "Please refund me again.")).toMatchObject({
+      ok: false,
+    });
+  });
+
   it("still applies the progress limits", () => {
     const purchase = buyIndividually(base.user.id);
     const request = openRequest(base.user.id, purchase.id);

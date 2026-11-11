@@ -136,6 +136,8 @@ function getSecondsWatched(userId: number, lessonIds: number[]) {
   return furthestPerLesson.reduce((total, row) => total + row.furthest, 0);
 }
 
+// Deliberately includes revoked Enrollments: having completed the course is a
+// fact about the Student that a later Refund does not undo.
 function hasCompletedCourse(userId: number, courseId: number) {
   return !!db
     .select({ id: enrollments.id })
@@ -585,6 +587,13 @@ const PROGRESS_REASONS: Record<SeatRefundBlocker, string> = {
 export function quoteRefund(purchaseId: number): RefundQuote {
   const purchase = getPurchase(purchaseId);
   if (!purchase) return { refundable: false, reason: "Purchase not found." };
+
+  if (hasIssuedRefundForCourse(purchase.userId, purchase.courseId)) {
+    return {
+      refundable: false,
+      reason: "This user has already had a refund issued for this course.",
+    };
+  }
 
   const seatCodes = getSeatCodes(purchase.id);
 

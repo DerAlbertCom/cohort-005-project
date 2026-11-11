@@ -500,7 +500,10 @@ function RowActions({ row }: { row: AdminRefundRequestRow }) {
             {students || purchaser} will get access to {row.courseTitle} back,
             with their earlier progress.
           </p>
-          <p>This only gives access back; it does not affect any money.</p>
+          <p>
+            This only gives access back; it does not affect any money. Refunded
+            seat codes stay invalid.
+          </p>
         </ConfirmAction>
       )}
     </div>
