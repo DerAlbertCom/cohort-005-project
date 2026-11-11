@@ -55,7 +55,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     throw data("User not found.", { status: 404 });
   }
 
-  const openRefundRequests = db
+  const pendingChargebacks = db
     .select({
       id: refunds.id,
       courseTitle: courses.title,
@@ -70,7 +70,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     .where(
       and(
         eq(purchases.userId, currentUserId),
-        eq(refunds.status, RefundStatus.Open)
+        eq(refunds.status, RefundStatus.Requested)
       )
     )
     .all();
@@ -83,7 +83,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       bio: currentUser.bio,
       role: currentUser.role,
     },
-    openRefundRequests,
+    pendingChargebacks,
   };
 }
 
@@ -122,7 +122,7 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function Settings({ loaderData }: Route.ComponentProps) {
-  const { user, openRefundRequests } = loaderData;
+  const { user, pendingChargebacks } = loaderData;
   const fetcher = useFetcher();
   const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -209,35 +209,35 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
         </CardContent>
       </Card>
 
-      {openRefundRequests.length > 0 && (
+      {pendingChargebacks.length > 0 && (
         <Card className="mt-8 max-w-md">
           <CardHeader>
-            <h2 className="text-lg font-semibold">Refund Requests</h2>
+            <h2 className="text-lg font-semibold">Pending Chargeback</h2>
             <p className="text-sm text-muted-foreground">
-              {openRefundRequests.length === 1
-                ? "One refund request is waiting on us."
-                : `${openRefundRequests.length} refund requests are waiting on us.`}
+              {pendingChargebacks.length === 1
+                ? "One chargeback is waiting on us."
+                : `${pendingChargebacks.length} chargebacks are waiting on us.`}
             </p>
           </CardHeader>
           <CardContent className="space-y-4">
-            {openRefundRequests.map((refundRequest) => (
-              <div key={refundRequest.id} className="rounded-md border p-3">
+            {pendingChargebacks.map((chargeback) => (
+              <div key={chargeback.id} className="rounded-md border p-3">
                 <div className="flex items-start justify-between gap-3">
                   <Link
-                    to={`/courses/${refundRequest.courseSlug}`}
+                    to={`/courses/${chargeback.courseSlug}`}
                     className="font-medium hover:underline"
                   >
-                    {refundRequest.courseTitle}
+                    {chargeback.courseTitle}
                   </Link>
                   <span className="shrink-0 rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
-                    Open
+                    Pending Chargeback
                   </span>
                 </div>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  {formatPrice(refundRequest.amountPaid)} · raised{" "}
-                  {new Date(refundRequest.requestedAt).toLocaleDateString()}
+                  {formatPrice(chargeback.amountPaid)} · raised{" "}
+                  {new Date(chargeback.requestedAt).toLocaleDateString()}
                 </p>
-                <p className="mt-2 text-sm">{refundRequest.reason}</p>
+                <p className="mt-2 text-sm">{chargeback.reason}</p>
               </div>
             ))}
           </CardContent>

@@ -32,7 +32,7 @@ export enum QuestionType {
 }
 
 export enum RefundStatus {
-  Open = "open",
+  Requested = "requested",
   Approved = "approved",
   Declined = "declined",
 }
@@ -239,7 +239,7 @@ export const refunds = sqliteTable(
     status: text("status")
       .notNull()
       .$type<RefundStatus>()
-      .default(RefundStatus.Open),
+      .default(RefundStatus.Requested),
     // The learner's own words, in the box on the course page.
     reason: text("reason").notNull(),
     // Null until someone approves — a declined request refunds nothing.

@@ -10,7 +10,6 @@ import {
   UserRole,
   CourseStatus,
   LessonProgressStatus,
-  RefundStatus,
   QuestionType,
   TeamMemberRole,
 } from "../app/db/schema";
@@ -2724,12 +2723,13 @@ This course is still in draft while the cluster examples are rewritten against t
     []
   );
 
-  // ─── Liam's Refund Request ───
-  // One learner with an Open Refund Request. The dates count back from
+  // ─── Liam's Purchase ───
+  // One learner part-way through a recent purchase, with no request raised, so
+  // the course page offers "Cancel my purchase". The dates count back from
   // today, so the fourteen-day refund window is still open whenever you seed.
 
   const liam = studentByEmail("liam@example.com");
-  const [liamPurchase] = db
+  db
     .insert(schema.purchases)
     .values({
       userId: liam.id,
@@ -2738,8 +2738,7 @@ This course is still in draft while the cluster examples are rewritten against t
       country: null,
       createdAt: daysAgo(9),
     })
-    .returning()
-    .all();
+    .run();
   db.insert(schema.enrollments)
     .values({
       userId: liam.id,
@@ -2772,16 +2771,6 @@ This course is still in draft while the cluster examples are rewritten against t
       updatedAt: daysAgo(6),
     })
     .run();
-  db.insert(schema.refunds)
-    .values({
-      purchaseId: liamPurchase.id,
-      status: RefundStatus.Open,
-      reason: "Bought the wrong one, I meant the advanced course.",
-      requestedAt: daysAgo(4),
-    })
-    .run();
-
-  console.log("Created Liam's Refund Request.");
 
   // ─── Flush watch events ───
   // Batched: the heartbeat makes these by far the largest table, and one
