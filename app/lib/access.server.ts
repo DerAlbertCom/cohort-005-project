@@ -11,6 +11,7 @@ import { getCurrentUserId } from "~/lib/session";
 import { resolveCountry } from "~/lib/country.server";
 import { checkPppAccess } from "~/lib/ppp";
 import { isEnrolled } from "~/lib/enrollments.server";
+import { isReadOnly } from "~/lib/refund-requests.server";
 
 function getUserById(id: number) {
   return db.select().from(users).where(eq(users.id, id)).get();
@@ -54,6 +55,13 @@ export type Access = {
    * Staff always can. Students need an enrollment that isn't PPP-blocked.
    */
   canViewContent: boolean;
+  /**
+   * Read-only Access: a Refund affecting their Enrollment is in progress, so
+   * they may open only Lessons they already Completed and may not add Lesson
+   * Progress, video watch events, Quiz Attempts, Discussion comments or
+   * Ratings. Never true for staff.
+   */
+  readOnly: boolean;
 };
 
 const SIGNED_OUT: Access = {
@@ -67,6 +75,7 @@ const SIGNED_OUT: Access = {
   pppBlockedCountry: null,
   pppPurchaseCountry: null,
   canViewContent: false,
+  readOnly: false,
 };
 
 export async function getAccess(
@@ -114,6 +123,7 @@ export async function getAccess(
     pppBlockedCountry: ppp.blockedCountry,
     pppPurchaseCountry: ppp.purchaseCountry,
     canViewContent: isStaff || (enrolled && !ppp.blocked),
+    readOnly: enrolled && !isStaff && isReadOnly(userId, courseId),
   };
 }
 
@@ -186,3 +196,38 @@ export async function requireInstructorOrAdmin(request: Request) {
 
   return { userId, user, isAdmin: user.role === UserRole.Admin };
 }
+
+/**
+ * Throws unless the user is an application Admin.
+ */
+export async function requireAdmin(request: Request) {
+  const userId = await requireUserId(request);
+  const user = getUserById(userId);
+
+  if (!user || user.role !== UserRole.Admin) {
+    throw data("Only admins can access this page.", { status: 403 });
+  }
+
+  return { userId, user };
+}
+
+/**
+ * Like requireContentAccess, but also throws 403 for a Student with Read-only
+ * Access. Use in actions that add Lesson Progress, video watch events, Quiz
+ * Attempts, Discussion comments or Ratings.
+ */
+export async function requireParticipation(
+  request: Request,
+  courseId: number
+): Promise<Access> {
+  const access = await requireContentAccess(request, courseId);
+
+  if (access.readOnly) {
+    throw data(READ_ONLY_MESSAGE, { status: 403 });
+  }
+
+  return access;
+}
+
+export const READ_ONLY_MESSAGE =
+  "This course is read-only while your refund is being handled. You can revisit the lessons you have completed, but you cannot continue with new ones.";

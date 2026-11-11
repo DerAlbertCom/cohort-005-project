@@ -35,7 +35,15 @@ import {
   TabsContent,
   TabsContentNoShift,
 } from "~/components/ui/tabs";
-import { BookOpen, Clock, Users, ArrowLeft, Minus, Plus } from "lucide-react";
+import {
+  BookOpen,
+  Clock,
+  Users,
+  ArrowLeft,
+  Minus,
+  Plus,
+  Info,
+} from "lucide-react";
 import { CourseImage } from "~/components/course-image";
 import { UserAvatar } from "~/components/user-avatar";
 import { data } from "react-router";
@@ -43,6 +51,12 @@ import { formatDuration, formatPrice } from "~/lib/utils";
 import { resolveCountry } from "~/lib/country.server";
 import { calculatePppPrice, getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
 import { parseFormData, parseParams } from "~/lib/validation";
+import { hasIssuedRefundForCourse } from "~/lib/refund-requests.server";
+import {
+  BOUGHT_AFTER_REFUND_NOTE,
+  buildPurchaseConfirmationEmail,
+} from "~/lib/emails";
+import { sendEmail } from "~/lib/email.server";
 
 function getCourseBySlug(slug: string) {
   return db.select().from(courses).where(eq(courses.slug, slug)).get();
@@ -321,6 +335,7 @@ export async function loader({ params, request, url }: Route.LoaderArgs) {
     country,
     countryName,
     isEnrolled: enrolled,
+    boughtAfterRefund: hasIssuedRefundForCourse(currentUserId, course.id),
   };
 }
 
@@ -349,12 +364,34 @@ export async function action({ params, request }: Route.ActionArgs) {
     ? calculatePppPrice(course.price, country)
     : course.price;
 
+  const purchaser = db
+    .select({ name: users.name, email: users.email })
+    .from(users)
+    .where(eq(users.id, currentUserId))
+    .get();
+  if (!purchaser) {
+    throw data("You must be logged in.", { status: 401 });
+  }
+
+  // Worked out before the purchase is created, so it describes earlier refunds.
+  const boughtAfterRefund = hasIssuedRefundForCourse(currentUserId, course.id);
+
   if (parsed.data.intent === "confirm-purchase") {
     if (isEnrolled(currentUserId, course.id)) {
       throw redirect(`/courses/${slug}`);
     }
     createPurchase(currentUserId, course.id, pppPrice, country);
+    // Restores a revoked Enrollment, so old progress returns after a refund.
     enrollUser(currentUserId, course.id, false, false);
+    sendEmail(
+      buildPurchaseConfirmationEmail({
+        purchaser,
+        courseTitle: course.title,
+        amountPaid: pppPrice,
+        seats: null,
+        boughtAfterRefund,
+      })
+    );
     throw redirect(`/courses/${slug}/welcome`);
   }
 
@@ -362,6 +399,15 @@ export async function action({ params, request }: Route.ActionArgs) {
   const { quantity } = parsed.data;
   const totalPrice = pppPrice * quantity;
   createTeamPurchase(currentUserId, course.id, totalPrice, country, quantity);
+  sendEmail(
+    buildPurchaseConfirmationEmail({
+      purchaser,
+      courseTitle: course.title,
+      amountPaid: totalPrice,
+      seats: quantity,
+      boughtAfterRefund,
+    })
+  );
   throw redirect(`/team`);
 }
 
@@ -377,6 +423,7 @@ export default function PurchaseConfirmation({
     tierInfo,
     countryName,
     isEnrolled,
+    boughtAfterRefund,
   } = loaderData;
   const fetcher = useFetcher();
   const isSubmitting = fetcher.state !== "idle";
@@ -464,6 +511,16 @@ export default function PurchaseConfirmation({
                 <p className="text-sm text-green-800 dark:text-green-300">
                   PPP discount applied for {countryName} — {tierInfo.label}
                 </p>
+              </div>
+            )}
+
+            {boughtAfterRefund && (
+              <div
+                role="note"
+                className="mb-4 flex gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200"
+              >
+                <Info className="mt-0.5 size-4 shrink-0" />
+                <p>{BOUGHT_AFTER_REFUND_NOTE}</p>
               </div>
             )}
 

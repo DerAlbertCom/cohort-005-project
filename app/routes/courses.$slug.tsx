@@ -4,7 +4,6 @@ import { toast } from "sonner";
 import { z } from "zod";
 import type { Route } from "./+types/courses.$slug";
 import { getCurrentUserId } from "~/lib/session";
-import { isEnrolled } from "~/lib/enrollments.server";
 import { db } from "~/db";
 import {
   courses,
@@ -34,6 +33,7 @@ import {
   CheckCircle2,
   Circle,
   Clock,
+  Lock,
   Pencil,
   PlayCircle,
   Users,
@@ -45,14 +45,15 @@ import { data, isRouteErrorResponse } from "react-router";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
 import { resolveCountry } from "~/lib/country.server";
-import {
-  calculatePppPrice,
-  getCountryTierInfo,
-} from "~/lib/ppp";
+import { calculatePppPrice, getCountryTierInfo } from "~/lib/ppp";
 import {
   checkRefundRequestEligibility,
   findIndividualPurchase,
+  getLatestRefundRequest,
 } from "~/lib/refund-requests.server";
+import { getAccess, READ_ONLY_MESSAGE } from "~/lib/access.server";
+import { getRefundState } from "~/lib/refund-status";
+import { RefundRequestBanner } from "~/components/refund-request-banner";
 import { parseFormData } from "~/lib/validation";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
 import { StarRating, StarRatingInput } from "~/components/star-rating";
@@ -245,6 +246,19 @@ function getLessonProgressForCourse(userId: number, courseId: number) {
     .all();
 }
 
+function getLastCompletedLessonId(
+  course: { modules: Array<{ lessons: Array<{ id: number }> }> },
+  lessonProgressMap: Record<number, string>
+): number | null {
+  const completed = course.modules
+    .flatMap((mod) => mod.lessons)
+    .filter(
+      (lesson) =>
+        lessonProgressMap[lesson.id] === LessonProgressStatus.Completed
+    );
+  return completed.at(-1)?.id ?? null;
+}
+
 function getNextIncompleteLesson(userId: number, courseId: number) {
   const courseModules = db
     .select()
@@ -295,7 +309,10 @@ function findRating(userId: number, courseId: number) {
     .select()
     .from(courseRatings)
     .where(
-      and(eq(courseRatings.userId, userId), eq(courseRatings.courseId, courseId))
+      and(
+        eq(courseRatings.userId, userId),
+        eq(courseRatings.courseId, courseId)
+      )
     )
     .get();
 }
@@ -359,11 +376,8 @@ function rateCourse(userId: number, courseId: number, rating: number) {
  * What the Purchaser is offered if they want to raise a Refund Request, or
  * null if this Purchase is not eligible for one.
  */
-function getRefundRequestOffer(userId: number, courseId: number) {
-  const purchase = findIndividualPurchase(userId, courseId);
-  if (!purchase) return null;
-
-  const eligibility = checkRefundRequestEligibility(userId, purchase.id);
+function getRefundRequestOffer(userId: number, purchaseId: number) {
+  const eligibility = checkRefundRequestEligibility(userId, purchaseId);
   if (!eligibility.eligible) return null;
 
   return {
@@ -371,6 +385,33 @@ function getRefundRequestOffer(userId: number, courseId: number) {
     lastDayInWindow: eligibility.lastDayInWindow,
   };
 }
+
+/**
+ * The latest Refund Request on the Purchaser's own Purchase of the course,
+ * shaped for the status banner — or null if they have never asked for one.
+ * Seat holders have no Purchase of their own, so never get one.
+ */
+function getRefundRequestStatus(userId: number, courseId: number) {
+  const purchase = findIndividualPurchase(userId, courseId);
+  if (!purchase) return { purchaseId: null, refundRequest: null };
+
+  const latest = getLatestRefundRequest(purchase.id);
+  if (!latest) return { purchaseId: purchase.id, refundRequest: null };
+
+  return {
+    purchaseId: purchase.id,
+    refundRequest: {
+      state: getRefundState(latest.status, latest.refundStatus),
+      amount: latest.amount,
+      requestedAt: latest.requestedAt,
+      declineReason: latest.declineReason,
+      seatBreakdown: latest.seatBreakdown,
+    },
+  };
+}
+
+const READ_ONLY_NOTE =
+  "This course is read-only while a refund is being handled. You can revisit the lessons you have completed, but new lessons, quizzes, comments and ratings are paused.";
 
 const ratingSchema = z.object({
   rating: z.coerce.number().int().min(MIN_RATING).max(MAX_RATING),
@@ -398,21 +439,34 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   }
 
   const lessonCount = getLessonCountForCourse(course.id);
-  const currentUserId = await getCurrentUserId(request);
+  const access = await getAccess(request, course.id);
+  const currentUserId = access.userId;
+  const enrolled = access.enrolled;
+  const readOnly = access.readOnly;
 
-  let enrolled = false;
   let progress = 0;
   let lessonProgressMap: Record<number, string> = {};
   let nextLessonId: number | null = null;
   let refundRequestOffer: { amount: number; lastDayInWindow: string } | null =
     null;
+  let refundRequest: ReturnType<
+    typeof getRefundRequestStatus
+  >["refundRequest"] = null;
 
   if (currentUserId) {
-    enrolled = isEnrolled(currentUserId, course.id);
+    // Shown whether or not they are still enrolled — a Purchaser whose refund
+    // has been Issued should still see that it was sent.
+    const status = getRefundRequestStatus(currentUserId, course.id);
+    refundRequest = status.refundRequest;
+
+    if (enrolled && status.purchaseId !== null && !refundRequest) {
+      refundRequestOffer = getRefundRequestOffer(
+        currentUserId,
+        status.purchaseId
+      );
+    }
 
     if (enrolled) {
-      refundRequestOffer = getRefundRequestOffer(currentUserId, course.id);
-
       progress = calculateProgress(currentUserId, course.id, false);
 
       const progressRecords = getLessonProgressForCourse(
@@ -423,8 +477,17 @@ export async function loader({ params, request }: Route.LoaderArgs) {
         lessonProgressMap[record.lessonId] = record.status;
       }
 
-      const nextLesson = getNextIncompleteLesson(currentUserId, course.id);
-      nextLessonId = nextLesson?.id ?? null;
+      // Read-only Access opens only Completed lessons, so "Continue" goes
+      // back to the last one they finished rather than to a locked lesson.
+      if (readOnly) {
+        nextLessonId = getLastCompletedLessonId(
+          courseWithDetails,
+          lessonProgressMap
+        );
+      } else {
+        const nextLesson = getNextIncompleteLesson(currentUserId, course.id);
+        nextLessonId = nextLesson?.id ?? null;
+      }
     }
   }
 
@@ -456,6 +519,8 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     ratingSummary,
     userRating,
     refundRequestOffer,
+    refundRequest,
+    readOnly,
   };
 }
 
@@ -473,10 +538,15 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("Course not found", { status: 404 });
   }
 
-  if (!isEnrolled(currentUserId, course.id)) {
+  const access = await getAccess(request, course.id);
+  if (!access.enrolled) {
     throw data("You must be enrolled in this course to rate it.", {
       status: 403,
     });
+  }
+
+  if (access.readOnly) {
+    throw data(READ_ONLY_MESSAGE, { status: 403 });
   }
 
   const formData = await request.formData();
@@ -557,6 +627,8 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     ratingSummary,
     userRating,
     refundRequestOffer,
+    refundRequest,
+    readOnly,
   } = loaderData;
   const isInstructor = currentUserId === course.instructorId;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -731,6 +803,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
             <CourseContent
               course={course}
               enrolled={enrolled}
+              readOnly={readOnly}
               isInstructor={isInstructor}
               lessonProgressMap={lessonProgressMap}
             />
@@ -770,37 +843,63 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                   </div>
                   {course.modules.length > 0 &&
                     (() => {
-                      const targetLessonId =
-                        nextLessonId ?? course.modules[0].lessons[0]?.id;
+                      const targetLessonId = readOnly
+                        ? nextLessonId
+                        : (nextLessonId ?? course.modules[0].lessons[0]?.id);
                       return targetLessonId ? (
                         <Link
                           to={`/courses/${course.slug}/lessons/${targetLessonId}`}
                         >
                           <Button className="w-full">
                             <PlayCircle className="mr-2 size-4" />
-                            {progress > 0
-                              ? "Continue Learning"
-                              : "Start Course"}
+                            {readOnly
+                              ? "Revisit Completed Lessons"
+                              : progress > 0
+                                ? "Continue Learning"
+                                : "Start Course"}
                           </Button>
                         </Link>
                       ) : null;
                     })()}
+                  {readOnly && !refundRequest && (
+                    <p className="flex items-start gap-2 text-sm text-muted-foreground">
+                      <Lock className="mt-0.5 size-4 shrink-0" />
+                      {READ_ONLY_NOTE}
+                    </p>
+                  )}
                   <Link to={teamPurchaseLink}>
                     <Button variant="outline" className="w-full">
                       <Users className="mr-2 size-4" />
                       Buy More Seats
                     </Button>
                   </Link>
-                  <RateCourse userRating={userRating} />
-                  {refundRequestOffer && (
-                    <RequestRefund
-                      slug={course.slug}
-                      amount={refundRequestOffer.amount}
-                    />
+                  {!readOnly && <RateCourse userRating={userRating} />}
+                  {refundRequest ? (
+                    <div className="border-t pt-4">
+                      <RefundRequestBanner
+                        {...refundRequest}
+                        audience="student"
+                      />
+                    </div>
+                  ) : (
+                    refundRequestOffer && (
+                      <RequestRefund
+                        slug={course.slug}
+                        amount={refundRequestOffer.amount}
+                      />
+                    )
                   )}
                 </>
               ) : (
-                enrollButton
+                <>
+                  {refundRequest && (
+                    <RefundRequestBanner
+                      {...refundRequest}
+                      audience="student"
+                    />
+                  )}
+                  {enrollButton}
+                </>
               )}
               <div className="space-y-2 pt-2 text-sm text-muted-foreground">
                 <div className="flex items-center gap-2">
@@ -935,6 +1034,7 @@ function RequestRefund({ slug, amount }: { slug: string; amount: number }) {
 function CourseContent({
   course,
   enrolled,
+  readOnly,
   isInstructor,
   lessonProgressMap,
 }: {
@@ -952,6 +1052,7 @@ function CourseContent({
     }>;
   };
   enrolled: boolean;
+  readOnly: boolean;
   isInstructor: boolean;
   lessonProgressMap: Record<number, string>;
 }) {
@@ -1022,6 +1123,8 @@ function CourseContent({
                           >
                             {isCompleted ? (
                               <CheckCircle2 className="size-4 shrink-0 text-green-500" />
+                            ) : readOnly ? (
+                              <Lock className="size-4 shrink-0 text-muted-foreground" />
                             ) : isLessonInProgress ? (
                               <PlayCircle className="size-4 shrink-0 text-blue-500" />
                             ) : (

@@ -10,24 +10,26 @@ import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
 import { Textarea } from "~/components/ui/textarea";
-import {
-  UserRole,
-  RefundRequestStatus,
-  users,
-  courses,
-  purchases,
-  refundRequests,
-} from "~/db/schema";
+import { UserRole, RefundRequestStatus, users } from "~/db/schema";
 import { AlertTriangle } from "lucide-react";
 import { data, isRouteErrorResponse, Link } from "react-router";
 import { db } from "~/db";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { formatPrice } from "~/lib/utils";
+import { listRefundRequestsForPurchaser } from "~/lib/refund-requests.server";
+import { getRefundState, REFUND_STATE_LABELS } from "~/lib/refund-status";
+import { describeSeat } from "~/lib/team-refund";
 
 const settingsSchema = z.object({
   name: z.string().trim().min(1, "Name cannot be empty."),
   bio: z.string().trim().optional(),
 });
+
+const settingsSearchSchema = z.object({
+  all: z.literal("1").optional().catch(undefined),
+});
+
+const REFUND_REQUEST_PERIOD_MONTHS = 12;
 
 export function meta() {
   return [
@@ -55,25 +57,18 @@ export async function loader({ request }: Route.LoaderArgs) {
     throw data("User not found.", { status: 404 });
   }
 
-  const openRefundRequests = db
-    .select({
-      id: refundRequests.id,
-      courseTitle: courses.title,
-      courseSlug: courses.slug,
-      amountPaid: purchases.amountPaid,
-      reason: refundRequests.reason,
-      requestedAt: refundRequests.requestedAt,
-    })
-    .from(refundRequests)
-    .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(
-      and(
-        eq(purchases.userId, currentUserId),
-        eq(refundRequests.status, RefundRequestStatus.Open)
-      )
-    )
-    .all();
+  const url = new URL(request.url);
+  const showAll =
+    settingsSearchSchema.parse(Object.fromEntries(url.searchParams)).all ===
+    "1";
+
+  let since: Date | null = null;
+  if (!showAll) {
+    since = new Date();
+    since.setMonth(since.getMonth() - REFUND_REQUEST_PERIOD_MONTHS);
+  }
+
+  const refundRequests = listRefundRequestsForPurchaser(currentUserId, since);
 
   return {
     user: {
@@ -83,7 +78,8 @@ export async function loader({ request }: Route.LoaderArgs) {
       bio: currentUser.bio,
       role: currentUser.role,
     },
-    openRefundRequests,
+    refundRequests,
+    showAll,
   };
 }
 
@@ -122,7 +118,7 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function Settings({ loaderData }: Route.ComponentProps) {
-  const { user, openRefundRequests } = loaderData;
+  const { user, refundRequests, showAll } = loaderData;
   const fetcher = useFetcher();
   const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -209,18 +205,32 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
         </CardContent>
       </Card>
 
-      {openRefundRequests.length > 0 && (
-        <Card className="mt-8 max-w-md">
-          <CardHeader>
-            <h2 className="text-lg font-semibold">Open Refund Requests</h2>
+      <Card className="mt-8 max-w-md">
+        <CardHeader>
+          <div className="flex items-baseline justify-between gap-3">
+            <h2 className="text-lg font-semibold">Refund Requests</h2>
+            <Link
+              to={showAll ? "/settings" : "/settings?all=1"}
+              className="shrink-0 text-sm text-muted-foreground hover:text-foreground"
+            >
+              {showAll ? "Show last 12 months" : "Show all"}
+            </Link>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            {showAll
+              ? "Every refund request you have made."
+              : "Refund requests you have made in the last 12 months."}
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {refundRequests.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              {openRefundRequests.length === 1
-                ? "One refund request is awaiting review."
-                : `${openRefundRequests.length} refund requests are awaiting review.`}
+              {showAll
+                ? "You have not made any refund requests."
+                : "You have not made any refund requests in the last 12 months."}
             </p>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {openRefundRequests.map((refundRequest) => (
+          ) : (
+            refundRequests.map((refundRequest) => (
               <div key={refundRequest.id} className="rounded-md border p-3">
                 <div className="flex items-start justify-between gap-3">
                   <Link
@@ -229,20 +239,42 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
                   >
                     {refundRequest.courseTitle}
                   </Link>
-                  <span className="shrink-0 rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
-                    Open
+                  <span className="shrink-0 rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium">
+                    {
+                      REFUND_STATE_LABELS[
+                        getRefundState(
+                          refundRequest.status,
+                          refundRequest.refundStatus
+                        )
+                      ]
+                    }
                   </span>
                 </div>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  {formatPrice(refundRequest.amountPaid)} · requested{" "}
+                  {formatPrice(refundRequest.amount)} · requested{" "}
                   {new Date(refundRequest.requestedAt).toLocaleDateString()}
+                  {refundRequest.decidedAt &&
+                    ` · decided ${new Date(refundRequest.decidedAt).toLocaleDateString()}`}
                 </p>
                 <p className="mt-2 text-sm">{refundRequest.reason}</p>
+                {refundRequest.status === RefundRequestStatus.Declined &&
+                  refundRequest.declineReason && (
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      Reason for declining: {refundRequest.declineReason}
+                    </p>
+                  )}
+                {refundRequest.seatBreakdown && (
+                  <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-muted-foreground">
+                    {refundRequest.seatBreakdown.map((seat) => (
+                      <li key={seat.couponId}>{describeSeat(seat)}</li>
+                    ))}
+                  </ul>
+                )}
               </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
+            ))
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

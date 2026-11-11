@@ -2,8 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Link, useFetcher, useNavigate } from "react-router";
 import { toast } from "sonner";
 import type { Route } from "./+types/courses.$slug.lessons.$lessonId";
-import { getCurrentUserId } from "~/lib/session";
-import { getAccess, requireContentAccess } from "~/lib/access.server";
+import { getAccess, requireParticipation } from "~/lib/access.server";
 import { renderComment } from "~/lib/comment-markdown.server";
 import {
   CommentThread,
@@ -41,6 +40,7 @@ import {
   Clock,
   Github,
   HelpCircle,
+  Lock,
   MapPin,
   PlayCircle,
   ShieldAlert,
@@ -63,6 +63,11 @@ const lessonParamsSchema = z.object({
 
 const markCompleteSchema = z.object({
   intent: z.literal("mark-complete"),
+});
+
+const submitQuizSchema = z.object({
+  intent: z.literal("submit-quiz"),
+  quizId: z.coerce.number().int(),
 });
 
 const createCommentSchema = z.object({
@@ -724,6 +729,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   const access = await getAccess(request, course.id);
   const currentUserId = access.userId;
   const enrolled = access.enrolled;
+  const readOnly = access.readOnly;
   let lessonStatus: string | null = null;
   let lastWatchPosition = 0;
   let watchProgress = 0;
@@ -731,8 +737,11 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 
   if (currentUserId) {
     if (enrolled) {
-      // Mark lesson as in-progress when viewed
-      markLessonInProgress(currentUserId, lessonId);
+      // Mark lesson as in-progress when viewed — but Read-only Access adds no
+      // new Lesson Progress.
+      if (!readOnly) {
+        markLessonInProgress(currentUserId, lessonId);
+      }
       const progress = getLessonProgress(currentUserId, lessonId);
       lessonStatus = progress?.status ?? null;
 
@@ -765,17 +774,24 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   const { pppBlocked, pppBlockedCountry, pppPurchaseCountry, canViewContent } =
     access;
 
+  // Read-only Access: only Lessons already Completed stay open. Anything else
+  // is locked, and none of its content leaves the server.
+  const lessonLocked =
+    readOnly && lessonStatus !== LessonProgressStatus.Completed;
+
   // Comments are confidential to the course: only people who can read the
   // lesson can read the discussion on it.
   const instructor = getUserById(course.instructorId);
-  const comments = canViewContent
-    ? await renderThread(getLessonThread(lessonId))
-    : [];
+  const comments =
+    canViewContent && !lessonLocked
+      ? await renderThread(getLessonThread(lessonId))
+      : [];
 
   // Render lesson content from Markdown to HTML server-side
-  const contentHtml = lesson.content
-    ? await renderMarkdown(lesson.content)
-    : null;
+  const contentHtml =
+    lesson.content && !lessonLocked
+      ? await renderMarkdown(lesson.content)
+      : null;
 
   // Build prev/next navigation
   const allLessons = flattenCourseLessons(courseWithDetails);
@@ -785,7 +801,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     currentIndex < allLessons.length - 1 ? allLessons[currentIndex + 1] : null;
 
   // Check for quiz attached to this lesson
-  const quizRecord = getQuizByLessonId(lessonId);
+  const quizRecord = lessonLocked ? undefined : getQuizByLessonId(lessonId);
   let quiz: {
     id: number;
     title: string;
@@ -847,17 +863,21 @@ export async function loader({ params, request }: Route.LoaderArgs) {
       id: mod.id,
       title: mod.title,
     },
-    lesson,
+    lesson: lessonLocked
+      ? { ...lesson, content: null, videoUrl: null, githubRepoUrl: null }
+      : lesson,
     contentHtml,
     lessonStatus,
     enrolled,
+    readOnly,
+    lessonLocked,
     currentUserId,
     prevLesson,
     nextLesson,
     quiz,
     bestAttempt,
-    lastWatchPosition,
-    watchProgress,
+    lastWatchPosition: lessonLocked ? 0 : lastWatchPosition,
+    watchProgress: lessonLocked ? 0 : watchProgress,
     lessonProgressMap,
     pppBlocked,
     pppBlockedCountry,
@@ -877,7 +897,17 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("Course not found", { status: 404 });
   }
 
-  const currentUserId = await getCurrentUserId(request);
+  const lessonCourse = getCourseForLesson(lessonId);
+  if (!lessonCourse || lessonCourse.courseId !== course.id) {
+    throw data("Lesson not found in this course", { status: 404 });
+  }
+
+  // Every intent here adds Lesson Progress, a Quiz Attempt or a Discussion
+  // comment, so all of them need Content Access without Read-only Access.
+  // Re-checked here rather than relying on the loader — loader guards don't
+  // protect actions.
+  const access = await requireParticipation(request, course.id);
+  const currentUserId = access.userId;
   if (!currentUserId) {
     throw data("You must be logged in", { status: 401 });
   }
@@ -885,15 +915,11 @@ export async function action({ params, request }: Route.ActionArgs) {
   const formData = await request.formData();
   const intent = formData.get("intent");
 
-  // Comment intents re-check access here rather than relying on the loader —
-  // loader guards don't protect actions.
   if (
     intent === "create-comment" ||
     intent === "edit-comment" ||
     intent === "delete-comment"
   ) {
-    const access = await requireContentAccess(request, course.id);
-
     try {
       if (intent === "create-comment") {
         const parsed = parseFormData(formData, createCommentSchema);
@@ -945,14 +971,26 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   if (intent === "mark-complete") {
+    const parsed = parseFormData(formData, markCompleteSchema);
+    if (!parsed.success) {
+      throw data("Invalid action", { status: 400 });
+    }
     markLessonComplete(currentUserId, lessonId);
     return { success: true };
   }
 
   if (intent === "submit-quiz") {
-    const quizId = Number(formData.get("quizId"));
-    if (isNaN(quizId)) {
+    const parsed = parseFormData(formData, submitQuizSchema);
+    if (!parsed.success) {
       throw data("Invalid quiz ID", { status: 400 });
+    }
+    const { quizId } = parsed.data;
+
+    // Scope the quiz to this lesson so a quiz elsewhere can't be attempted
+    // by posting its id to this route.
+    const quizRecord = getQuizByLessonId(lessonId);
+    if (!quizRecord || quizRecord.id !== quizId) {
+      throw data("Quiz not found", { status: 404 });
     }
 
     // Collect answers: form fields named "question-{questionId}" with value = optionId
@@ -1015,6 +1053,8 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
     contentHtml,
     lessonStatus,
     enrolled,
+    readOnly,
+    lessonLocked,
     currentUserId,
     prevLesson,
     nextLesson,
@@ -1102,6 +1142,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
         currentLessonId={lesson.id}
         lessonProgressMap={lessonProgressMap}
         enrolled={enrolled}
+        readOnly={readOnly}
       />
 
       <div className="flex-1 p-6 lg:p-8">
@@ -1152,39 +1193,73 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
             )}
           </div>
 
-          {/* YouTube Video */}
-          {lesson.videoUrl && (
-            <YouTubePlayer
-              videoUrl={lesson.videoUrl}
-              lessonId={lesson.id}
-              title={lesson.title}
-              startPosition={lastWatchPosition}
-              durationMinutes={lesson.durationMinutes}
-              watchProgress={watchProgress}
-              trackingEnabled={enrolled && !!currentUserId}
-              autoplay={autoplay}
-              onToggleAutoplay={toggleAutoplay}
-            />
-          )}
-
-          {/* Lesson Content */}
-          {contentHtml && (
-            <div
-              className="prose prose-neutral dark:prose-invert mb-8 max-w-none"
-              dangerouslySetInnerHTML={{ __html: contentHtml }}
-            />
-          )}
-
-          {!contentHtml && !lesson.videoUrl && (
+          {lessonLocked ? (
             <Card className="mb-8">
-              <CardContent className="py-12 text-center text-muted-foreground">
-                No content has been added to this lesson yet.
+              <CardContent className="py-12 text-center">
+                <Lock className="mx-auto mb-4 size-10 text-muted-foreground" />
+                <h2 className="mb-2 text-lg font-semibold">
+                  This lesson is locked for now
+                </h2>
+                <p className="mx-auto max-w-md text-sm text-muted-foreground">
+                  This course is read-only while your refund request is being
+                  handled. You can revisit the lessons you have completed, but
+                  new lessons are locked.
+                </p>
+                <Link to={`/courses/${course.slug}`}>
+                  <Button variant="outline" className="mt-6">
+                    Back to Course
+                  </Button>
+                </Link>
               </CardContent>
             </Card>
+          ) : (
+            <>
+              {/* YouTube Video */}
+              {lesson.videoUrl && (
+                <YouTubePlayer
+                  videoUrl={lesson.videoUrl}
+                  lessonId={lesson.id}
+                  title={lesson.title}
+                  startPosition={lastWatchPosition}
+                  durationMinutes={lesson.durationMinutes}
+                  watchProgress={watchProgress}
+                  trackingEnabled={enrolled && !!currentUserId && !readOnly}
+                  autoplay={autoplay}
+                  onToggleAutoplay={toggleAutoplay}
+                />
+              )}
+
+              {/* Lesson Content */}
+              {contentHtml && (
+                <div
+                  className="prose prose-neutral dark:prose-invert mb-8 max-w-none"
+                  dangerouslySetInnerHTML={{ __html: contentHtml }}
+                />
+              )}
+
+              {!contentHtml && !lesson.videoUrl && (
+                <Card className="mb-8">
+                  <CardContent className="py-12 text-center text-muted-foreground">
+                    No content has been added to this lesson yet.
+                  </CardContent>
+                </Card>
+              )}
+            </>
+          )}
+
+          {readOnly && !lessonLocked && (
+            <div className="mb-8 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-muted-foreground dark:border-amber-900/50 dark:bg-amber-900/20">
+              <Lock className="mt-0.5 size-4 shrink-0" />
+              <p>
+                This course is read-only while your refund request is being
+                handled. You can rewatch this lesson, but quizzes, comments and
+                progress are paused.
+              </p>
+            </div>
           )}
 
           {/* Quiz Section */}
-          {quiz && enrolled && currentUserId && (
+          {quiz && enrolled && currentUserId && !readOnly && (
             <QuizSection
               quiz={quiz}
               bestAttempt={bestAttempt}
@@ -1195,7 +1270,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
           )}
 
           {/* Mark Complete / Up Next */}
-          {enrolled && currentUserId && (
+          {enrolled && currentUserId && !readOnly && (
             <div className="mb-8">
               {isCompleted ? (
                 <div className="flex items-center gap-3">
@@ -1241,12 +1316,12 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
           )}
 
           {/* Questions & Discussion — confidential to people with access */}
-          {canViewContent && (
+          {canViewContent && !lessonLocked && (
             <CommentThread
               comments={comments}
-              currentUserId={currentUserId}
+              currentUserId={readOnly ? null : currentUserId}
               canModerate={canModerate}
-              canPost
+              canPost={!readOnly}
               instructorName={instructorName}
             />
           )}
@@ -1310,6 +1385,7 @@ function CurriculumSidebar({
   currentLessonId,
   lessonProgressMap,
   enrolled,
+  readOnly,
 }: {
   course: { id: number; title: string; slug: string };
   curriculum: Array<{
@@ -1320,6 +1396,7 @@ function CurriculumSidebar({
   currentLessonId: number;
   lessonProgressMap: Record<number, string>;
   enrolled: boolean;
+  readOnly: boolean;
 }) {
   // Find which module the current lesson belongs to
   const currentModuleId = curriculum.find((m) =>
@@ -1400,6 +1477,8 @@ function CurriculumSidebar({
                             {enrolled ? (
                               isCompleted ? (
                                 <CheckCircle2 className="size-3.5 shrink-0 text-green-500" />
+                              ) : readOnly ? (
+                                <Lock className="size-3.5 shrink-0" />
                               ) : isInProgress ? (
                                 <PlayCircle className="size-3.5 shrink-0 text-blue-500" />
                               ) : (

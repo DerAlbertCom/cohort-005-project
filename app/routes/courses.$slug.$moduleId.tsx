@@ -1,7 +1,6 @@
 import { Link } from "react-router";
 import type { Route } from "./+types/courses.$slug.$moduleId";
-import { getCurrentUserId } from "~/lib/session";
-import { isEnrolled } from "~/lib/enrollments.server";
+import { getAccess } from "~/lib/access.server";
 import { db } from "~/db";
 import {
   categories,
@@ -24,6 +23,7 @@ import {
   Circle,
   Clock,
   FileText,
+  Lock,
   PlayCircle,
   Video,
 } from "lucide-react";
@@ -174,22 +174,19 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     throw data("Module not found in this course", { status: 404 });
   }
 
-  const currentUserId = await getCurrentUserId(request);
+  const access = await getAccess(request, course.id);
+  const currentUserId = access.userId;
+  const enrolled = access.enrolled;
+  const readOnly = access.readOnly;
+  const lessonProgressMap: Record<number, string> = {};
 
-  let enrolled = false;
-  let lessonProgressMap: Record<number, string> = {};
-
-  if (currentUserId) {
-    enrolled = isEnrolled(currentUserId, course.id);
-
-    if (enrolled) {
-      const progressRecords = getLessonProgressForCourse(
-        currentUserId,
-        course.id
-      );
-      for (const record of progressRecords) {
-        lessonProgressMap[record.lessonId] = record.status;
-      }
+  if (currentUserId && enrolled) {
+    const progressRecords = getLessonProgressForCourse(
+      currentUserId,
+      course.id
+    );
+    for (const record of progressRecords) {
+      lessonProgressMap[record.lessonId] = record.status;
     }
   }
 
@@ -217,6 +214,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     },
     module: moduleWithLessons,
     enrolled,
+    readOnly,
     lessonProgressMap,
     moduleProgress,
     completedLessons,
@@ -258,6 +256,7 @@ export default function ModuleDetail({ loaderData }: Route.ComponentProps) {
     course,
     module: mod,
     enrolled,
+    readOnly,
     lessonProgressMap,
     moduleProgress,
     completedLessons,
@@ -353,6 +352,8 @@ export default function ModuleDetail({ loaderData }: Route.ComponentProps) {
                 {enrolled ? (
                   isCompleted ? (
                     <CheckCircle2 className="size-4 shrink-0 text-green-500" />
+                  ) : readOnly ? (
+                    <Lock className="size-4 shrink-0 text-muted-foreground" />
                   ) : isInProgress ? (
                     <PlayCircle className="size-4 shrink-0 text-blue-500" />
                   ) : (

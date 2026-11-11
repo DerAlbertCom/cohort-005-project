@@ -3,8 +3,11 @@ import { z } from "zod";
 import type { Route } from "./+types/api.video-tracking";
 import { getCurrentUserId } from "~/lib/session";
 import { parseJsonBody } from "~/lib/validation";
+import { READ_ONLY_MESSAGE } from "~/lib/access.server";
+import { isReadOnly } from "~/lib/refund-requests.server";
 import { db } from "~/db";
-import { videoWatchEvents } from "~/db/schema";
+import { lessons, modules, videoWatchEvents } from "~/db/schema";
+import { eq } from "drizzle-orm";
 
 const videoTrackingSchema = z.object({
   lessonId: z.number(),
@@ -26,8 +29,22 @@ export async function action({ request }: Route.ActionArgs) {
 
   const { lessonId, eventType, positionSeconds } = parsed.data;
 
-  db
-    .insert(videoWatchEvents)
+  const lesson = db
+    .select({ courseId: modules.courseId })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .where(eq(lessons.id, lessonId))
+    .get();
+
+  if (!lesson) {
+    throw data("Lesson not found", { status: 404 });
+  }
+
+  if (isReadOnly(currentUserId, lesson.courseId)) {
+    throw data(READ_ONLY_MESSAGE, { status: 403 });
+  }
+
+  db.insert(videoWatchEvents)
     .values({
       userId: currentUserId,
       lessonId,

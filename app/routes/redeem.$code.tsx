@@ -8,12 +8,13 @@ import { resolveCountry } from "~/lib/country.server";
 import { parseParams, parseFormData } from "~/lib/validation";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
-import { Ticket, AlertCircle, CheckCircle2, Globe } from "lucide-react";
+import { Ticket, AlertCircle, CheckCircle2, Globe, Ban, Clock } from "lucide-react";
 import { data } from "react-router";
 import { db } from "~/db";
 import { purchases, coupons, courses, enrollments } from "~/db/schema";
 import { eq } from "drizzle-orm";
 import { enroll, isEnrolled } from "~/lib/enrollments.server";
+import { checkSeatCodeRedeemable } from "~/lib/refund-requests.server";
 
 function getCourseById(id: number) {
   return db.select().from(courses).where(eq(courses.id, id)).get();
@@ -34,11 +35,22 @@ function redeemCoupon(
 ): RedeemResult {
   const coupon = getCouponByCode(code);
   if (!coupon) {
-    return { ok: false, error: "Coupon not found" };
+    return { ok: false, error: "Seat code not found" };
+  }
+
+  const redeemability = checkSeatCodeRedeemable(coupon.id);
+  if (!redeemability.redeemable) {
+    return {
+      ok: false,
+      error:
+        redeemability.reason === "invalidated"
+          ? "This seat code is no longer valid"
+          : "This seat code cannot be redeemed while a refund for this purchase is being handled",
+    };
   }
 
   if (coupon.redeemedByUserId !== null) {
-    return { ok: false, error: "Coupon has already been redeemed" };
+    return { ok: false, error: "This seat code has already been redeemed" };
   }
 
   if (isEnrolled(userId, coupon.courseId)) {
@@ -55,7 +67,7 @@ function redeemCoupon(
     return {
       ok: false,
       error:
-        "This coupon can only be redeemed from the same country as the purchaser",
+        "This seat code can only be redeemed from the same country as the purchaser",
     };
   }
 
@@ -81,10 +93,10 @@ const redeemActionSchema = z.object({
 });
 
 export function meta({ loaderData }: Route.MetaArgs) {
-  const title = loaderData?.course?.title ?? "Redeem Coupon";
+  const title = loaderData?.course?.title ?? "Redeem Seat Code";
   return [
     { title: `Redeem: ${title} — Cadence` },
-    { name: "description", content: `Redeem your coupon for ${title}` },
+    { name: "description", content: `Redeem your seat code for ${title}` },
   ];
 }
 
@@ -93,7 +105,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 
   const coupon = getCouponByCode(code);
   if (!coupon) {
-    throw data("Coupon not found.", { status: 404 });
+    throw data("Seat code not found.", { status: 404 });
   }
 
   const currentUserId = await getCurrentUserId(request);
@@ -108,12 +120,16 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     throw data("Course not found.", { status: 404 });
   }
 
+  const redeemability = checkSeatCodeRedeemable(coupon.id);
+  const unavailableReason = redeemability.redeemable
+    ? null
+    : redeemability.reason;
   const alreadyRedeemed = coupon.redeemedByUserId !== null;
   const alreadyEnrolled = isEnrolled(currentUserId, coupon.courseId);
 
   // Check country mismatch upfront so we can show a clear message
   let countryMismatch = false;
-  if (!alreadyRedeemed && !alreadyEnrolled) {
+  if (!unavailableReason && !alreadyRedeemed && !alreadyEnrolled) {
     const userCountry = await resolveCountry(request);
     const purchase = db
       .select()
@@ -128,6 +144,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   return {
     course: { id: course.id, title: course.title, slug: course.slug },
     code,
+    unavailableReason,
     alreadyRedeemed,
     alreadyEnrolled,
     countryMismatch,
@@ -168,8 +185,14 @@ export default function Redeem({
   loaderData,
   actionData,
 }: Route.ComponentProps) {
-  const { course, code, alreadyRedeemed, alreadyEnrolled, countryMismatch } =
-    loaderData;
+  const {
+    course,
+    code,
+    unavailableReason,
+    alreadyRedeemed,
+    alreadyEnrolled,
+    countryMismatch,
+  } = loaderData;
   const fetcher = useFetcher();
   const isSubmitting = fetcher.state !== "idle";
 
@@ -182,11 +205,9 @@ export default function Redeem({
   }, [fetcher.data, actionData]);
 
   // Determine which state to show
-  const canRedeem = !alreadyRedeemed && !alreadyEnrolled && !countryMismatch;
-
   return (
     <div className="mx-auto max-w-2xl p-6 lg:p-8">
-      <h1 className="mb-2 text-2xl font-bold">Redeem Coupon</h1>
+      <h1 className="mb-2 text-2xl font-bold">Redeem Seat Code</h1>
       <p className="mb-8 text-muted-foreground">
         You&apos;ve been invited to enroll in a course.
       </p>
@@ -199,21 +220,49 @@ export default function Redeem({
 
           <h2 className="mb-2 text-xl font-semibold">{course.title}</h2>
           <p className="mb-6 text-sm text-muted-foreground">
-            Coupon code:{" "}
+            Seat code:{" "}
             <code className="rounded bg-muted px-2 py-0.5">{code}</code>
           </p>
 
-          {alreadyRedeemed ? (
+          {unavailableReason === "invalidated" ? (
+            <div className="rounded-lg bg-muted p-4">
+              <div className="flex items-center justify-center gap-2">
+                <Ban className="size-5" />
+                <span className="font-medium">
+                  This code is no longer valid
+                </span>
+              </div>
+              <p className="mt-2 text-sm text-muted-foreground">
+                The seat this code was for has been refunded, so it can no
+                longer be redeemed. Please ask the person who shared this link
+                for a new seat code.
+              </p>
+            </div>
+          ) : unavailableReason === "refund_in_progress" ? (
+            <div className="rounded-lg bg-amber-50 p-4 dark:bg-amber-900/20">
+              <div className="flex items-center justify-center gap-2 text-amber-700 dark:text-amber-400">
+                <Clock className="size-5" />
+                <span className="font-medium">
+                  This code cannot be redeemed right now
+                </span>
+              </div>
+              <p className="mt-2 text-sm text-muted-foreground">
+                A refund for the purchase this seat code belongs to is being
+                handled, and its seat codes cannot be redeemed until that is
+                settled. Please check with the person who shared this link.
+              </p>
+            </div>
+          ) : alreadyRedeemed ? (
             <div className="rounded-lg bg-destructive/10 p-4">
               <div className="flex items-center justify-center gap-2 text-destructive">
                 <AlertCircle className="size-5" />
                 <span className="font-medium">
-                  This coupon has already been used
+                  This seat code has already been redeemed
                 </span>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                Someone has already claimed this seat. Please ask the person who
-                shared this link for a new coupon.
+                Someone has already redeemed this seat. Please ask the person
+                who shared this link for a new seat code.
               </p>
             </div>
           ) : alreadyEnrolled ? (
@@ -225,8 +274,8 @@ export default function Redeem({
                 </span>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                You already have access to this course. The coupon has not been
-                used, so it can still be shared with someone else.
+                You already have access to this course. The seat code has not
+                been redeemed, so it can still be shared with someone else.
               </p>
               <Link to={`/courses/${course.slug}`}>
                 <Button className="mt-4" size="lg">
@@ -241,7 +290,7 @@ export default function Redeem({
                 <span className="font-medium">Region restriction</span>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                This coupon can only be redeemed from the same country as the
+                This seat code can only be redeemed from the same country as the
                 person who purchased it. Your location doesn&apos;t match the
                 purchaser&apos;s country.
               </p>

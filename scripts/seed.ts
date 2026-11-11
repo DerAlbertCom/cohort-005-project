@@ -1,5 +1,14 @@
 import Database from "better-sqlite3";
-import { eq, gte, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
+import {
+  and,
+  eq,
+  gte,
+  isNotNull,
+  isNull,
+  notInArray,
+  sql,
+  type SQL,
+} from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
@@ -11,8 +20,11 @@ import {
   CourseStatus,
   LessonProgressStatus,
   QuestionType,
+  RefundRequestStatus,
+  RefundStatus,
   TeamMemberRole,
 } from "../app/db/schema";
+import { calculateTeamRefund } from "../app/lib/team-refund";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2714,7 +2726,7 @@ This course is still in draft while the cluster examples are rewritten against t
   );
 
   // Four seats on Design Systems, bought during launch week, none redeemed yet.
-  createTeamPurchase(
+  const novakTeam = createTeamPurchase(
     "marta.novak@student.dev",
     course3,
     4,
@@ -2773,6 +2785,270 @@ This course is still in draft while the cluster examples are rewritten against t
     })
     .run();
 
+  // ─── Refund Requests ───
+  // One Refund Request in every state, so the admin page, the banners and the
+  // settings page all have something to show. Rows are written directly, with
+  // the fields the app would have set at each step. Liam's purchase above is
+  // left alone so it stays eligible for a self-service request.
+  //
+  //   Open              Sophia Davis — Design Systems (individual)
+  //   Open              Marta Novak — Design Systems (team, nothing redeemed)
+  //   Approved/Pending  James Park — Design Systems (individual)
+  //   Approved/Failed   Olivia Martinez — Design Systems (individual)
+  //   Issued            Emma Wilson — Design Systems (individual, revoked)
+  //   Issued            Felix Andersen — REST APIs (team override with
+  //                     Redeemed seats and a per-seat breakdown)
+  //   Declined          Bossy McBossface — Design Systems (individual)
+
+  function buyForRefundStory(
+    email: string,
+    purchasedDaysAgo: number,
+    lessonsCompleted: number
+  ) {
+    const buyer = studentByEmail(email);
+    const [purchase] = db
+      .insert(schema.purchases)
+      .values({
+        userId: buyer.id,
+        courseId: course3.id,
+        amountPaid: course3.price,
+        country: "US",
+        createdAt: daysAgo(purchasedDaysAgo),
+      })
+      .returning()
+      .all();
+    const [enrollment] = db
+      .insert(schema.enrollments)
+      .values({
+        userId: buyer.id,
+        courseId: course3.id,
+        enrolledAt: daysAgo(purchasedDaysAgo),
+      })
+      .returning()
+      .all();
+    for (let i = 0; i < lessonsCompleted; i++) {
+      markComplete(
+        buyer.id,
+        course3LessonIds[i],
+        Math.max(0, purchasedDaysAgo - 1 - i)
+      );
+    }
+    markInProgress(buyer.id, course3LessonIds[lessonsCompleted]);
+    return { buyer, purchase, enrollment };
+  }
+
+  // Open: bought five days ago, asked for a refund two days ago. Read-only
+  // until an Admin decides.
+  const sophiaStory = buyForRefundStory("sophia.davis@student.dev", 5, 1);
+  addWatchSession(
+    sophiaStory.buyer.id,
+    course3LessonIds[0],
+    0,
+    300,
+    300,
+    4 * 24
+  );
+  db.insert(schema.refundRequests)
+    .values({
+      purchaseId: sophiaStory.purchase.id,
+      status: RefundRequestStatus.Open,
+      reason:
+        "I thought this course covered Figma tokens as well. It is mostly about Tailwind, which my team does not use.",
+      amount: sophiaStory.purchase.amountPaid,
+      requestedAt: daysAgo(2),
+    })
+    .run();
+
+  // Open, for a Team Purchase with no Redeemed seats (self-service from /team).
+  db.insert(schema.refundRequests)
+    .values({
+      purchaseId: novakTeam.purchase.id,
+      status: RefundRequestStatus.Open,
+      reason:
+        "Our design team was reorganised the week after we bought these seats, and nobody is going to use them now.",
+      amount: novakTeam.purchase.amountPaid,
+      requestedAt: daysAgo(1),
+    })
+    .run();
+
+  // Approved, refund still Pending.
+  const jamesStory = buyForRefundStory("james.park@student.dev", 12, 2);
+  db.insert(schema.refundRequests)
+    .values({
+      purchaseId: jamesStory.purchase.id,
+      status: RefundRequestStatus.Approved,
+      reason:
+        "The videos keep buffering on my connection and the course has no downloadable version.",
+      amount: jamesStory.purchase.amountPaid,
+      requestedAt: daysAgo(10),
+      resolvedAt: daysAgo(8),
+      resolvedByUserId: admin.id,
+      refundStatus: RefundStatus.Pending,
+      refundStatusAt: daysAgo(8),
+    })
+    .run();
+
+  // Approved, but sending the money Failed. Still read-only.
+  const oliviaStory = buyForRefundStory("olivia.martinez@student.dev", 25, 2);
+  db.insert(schema.refundRequests)
+    .values({
+      purchaseId: oliviaStory.purchase.id,
+      status: RefundRequestStatus.Approved,
+      reason: "I bought this by mistake. I meant to buy the TypeScript course.",
+      amount: oliviaStory.purchase.amountPaid,
+      requestedAt: daysAgo(20),
+      resolvedAt: daysAgo(18),
+      resolvedByUserId: admin.id,
+      refundStatus: RefundStatus.Failed,
+      refundStatusAt: daysAgo(15),
+    })
+    .run();
+
+  // Issued: the Enrollment is revoked, but its Lesson Progress is kept.
+  const emmaStory = buyForRefundStory("emma.wilson@student.dev", 30, 2);
+  db.insert(schema.refundRequests)
+    .values({
+      purchaseId: emmaStory.purchase.id,
+      status: RefundRequestStatus.Approved,
+      reason:
+        "The course is a good fit for beginners, but I already knew most of the material.",
+      amount: emmaStory.purchase.amountPaid,
+      requestedAt: daysAgo(28),
+      resolvedAt: daysAgo(26),
+      resolvedByUserId: admin.id,
+      refundStatus: RefundStatus.Issued,
+      refundStatusAt: daysAgo(24),
+    })
+    .run();
+  db.update(schema.enrollments)
+    .set({ revokedAt: daysAgo(24) })
+    .where(eq(schema.enrollments.id, emmaStory.enrollment.id))
+    .run();
+
+  // Declined, with the reason the Purchaser is shown.
+  const bossyStory = buyForRefundStory("bossy.mcbossface@student.dev", 9, 3);
+  db.insert(schema.refundRequests)
+    .values({
+      purchaseId: bossyStory.purchase.id,
+      status: RefundRequestStatus.Declined,
+      reason: "The examples do not work in my company's locked-down browser.",
+      amount: bossyStory.purchase.amountPaid,
+      requestedAt: daysAgo(7),
+      resolvedAt: daysAgo(5),
+      resolvedByUserId: admin.id,
+      declineReason:
+        "The examples run in every supported browser. Our support team has emailed you a workaround for your company's proxy settings.",
+    })
+    .run();
+
+  // Issued Refund Override for a Team Purchase with Redeemed seats, outside
+  // the Refund Window. Four seats: one holder completed the course (not
+  // refunded, keeps access), one barely started (refunded, revoked), two were
+  // never redeemed (refunded, codes invalidated). Seat holders are cohort
+  // students who had no Enrollment in the course yet.
+  const alreadyInCourse2 = db
+    .select({ userId: schema.enrollments.userId })
+    .from(schema.enrollments)
+    .where(eq(schema.enrollments.courseId, course2.id));
+  const teamAdminEmail = "felix.andersen@student.dev";
+  const [completedHolder, startedHolder] = db
+    .select({ email: schema.users.email })
+    .from(schema.users)
+    .where(
+      and(
+        eq(schema.users.role, UserRole.Student),
+        notInArray(schema.users.id, alreadyInCourse2),
+        notInArray(
+          schema.users.id,
+          [...students, bossy].map((student) => student.id)
+        ),
+        sql`${schema.users.email} <> ${teamAdminEmail}`
+      )
+    )
+    .orderBy(schema.users.id)
+    .limit(2)
+    .all()
+    .map((row) => studentByEmail(row.email));
+  if (!completedHolder || !startedHolder) {
+    throw new Error("Not enough cohort students to redeem the refunded seats");
+  }
+
+  const andersenTeam = createTeamPurchase(
+    teamAdminEmail,
+    course2,
+    4,
+    "TEAM-API-ANDERSEN",
+    45,
+    [completedHolder.email, startedHolder.email]
+  );
+
+  course2LessonIds.forEach((lessonId, i) =>
+    markComplete(completedHolder.id, lessonId, Math.max(22, 42 - i))
+  );
+  db.update(schema.enrollments)
+    .set({ completedAt: daysAgo(22) })
+    .where(
+      and(
+        eq(schema.enrollments.userId, completedHolder.id),
+        eq(schema.enrollments.courseId, course2.id)
+      )
+    )
+    .run();
+  markComplete(startedHolder.id, course2LessonIds[0], 38);
+  markInProgress(startedHolder.id, course2LessonIds[1]);
+
+  const teamRefund = calculateTeamRefund(
+    andersenTeam.purchase.amountPaid,
+    andersenTeam.coupons.map((coupon, i) => {
+      const holder = [completedHolder, startedHolder][i] ?? null;
+      return {
+        couponId: coupon.id,
+        holderUserId: holder?.id ?? null,
+        holderName: holder?.name ?? null,
+        blocker: holder === completedHolder ? "completed_course" : null,
+      };
+    })
+  );
+
+  db.insert(schema.refundRequests)
+    .values({
+      purchaseId: andersenTeam.purchase.id,
+      status: RefundRequestStatus.Approved,
+      reason:
+        "Created by an Admin: the team's Node project was cancelled, and the Purchaser asked for the unused seats back.",
+      amount: teamRefund.amount,
+      seatBreakdown: teamRefund.breakdown,
+      requestedAt: daysAgo(20),
+      resolvedAt: daysAgo(20),
+      resolvedByUserId: admin.id,
+      refundStatus: RefundStatus.Issued,
+      refundStatusAt: daysAgo(17),
+    })
+    .run();
+
+  for (const seat of teamRefund.breakdown) {
+    if (!seat.refunded) continue;
+    db.update(schema.coupons)
+      .set({ invalidatedAt: daysAgo(17) })
+      .where(eq(schema.coupons.id, seat.couponId))
+      .run();
+    if (seat.holderUserId !== null) {
+      db.update(schema.enrollments)
+        .set({ revokedAt: daysAgo(17) })
+        .where(
+          and(
+            eq(schema.enrollments.userId, seat.holderUserId),
+            eq(schema.enrollments.courseId, course2.id)
+          )
+        )
+        .run();
+    }
+  }
+
+  console.log(
+    `Created ${countRows(schema.refundRequests)} refund requests (team refund for ${teamAdminEmail}: ${teamRefund.amount} of ${andersenTeam.purchase.amountPaid} cents; ${completedHolder.name} completed, ${startedHolder.name} refunded).`
+  );
+
   // ─── Flush watch events ───
   // Batched: the heartbeat makes these by far the largest table, and one
   // statement per row would dominate the seed's runtime.
@@ -2825,7 +3101,11 @@ This course is still in draft while the cluster examples are rewritten against t
     `  Purchases: ${countRows(schema.purchases)} (${countRows(schema.purchases, gte(schema.purchases.createdAt, sevenDaysAgo))} in the last 7 days), spanning ${historyDays} days`
   );
   console.log(
-    `  Teams: ${countRows(schema.teams)}, coupons: ${countRows(schema.coupons)} (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed)`
+    `  Teams: ${countRows(schema.teams)}, coupons: ${countRows(schema.coupons)} (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed, ${countRows(schema.coupons, isNotNull(schema.coupons.invalidatedAt))} invalidated)`
+  );
+  const refunds = schema.refundRequests;
+  console.log(
+    `  Refund requests: ${countRows(refunds)} (${countRows(refunds, eq(refunds.status, RefundRequestStatus.Open))} open, ${countRows(refunds, eq(refunds.refundStatus, RefundStatus.Pending))} approved/pending, ${countRows(refunds, eq(refunds.refundStatus, RefundStatus.Failed))} approved/failed, ${countRows(refunds, eq(refunds.refundStatus, RefundStatus.Issued))} issued, ${countRows(refunds, eq(refunds.status, RefundRequestStatus.Declined))} declined), revoked enrollments: ${countRows(schema.enrollments, isNotNull(schema.enrollments.revokedAt))}`
   );
 }
 
