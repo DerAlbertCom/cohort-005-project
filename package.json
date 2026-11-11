@@ -9,7 +9,7 @@
     "create-pr": "ai-hero-cli create-pr --branch=live-run-through --upstream=https://github.com/ai-hero-dev/cohort-005-project.git",
     "pull": "ai-hero-cli pull --upstream=https://github.com/ai-hero-dev/cohort-005-project.git",
     "build": "react-router build",
-    "dev": "react-router dev",
+    "dev": "react-router dev --host 0.0.0.0 --port 5173",
     "start": "react-router-serve ./build/server/index.js",
     "request-logger": "tsx request-logger/proxy.ts",
     "typecheck": "react-router typegen && tsc",
