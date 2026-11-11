@@ -148,6 +148,27 @@ _Avoid_: Received when only sending has been confirmed.
 A Refund for which an attempt to send the money failed. The associated Refund Request remains Approved.
 _Avoid_: Declined Refund Request when the failure concerns payment rather than the review decision.
 
+**Refund Window**:
+The 14 days after a Purchase during which the Purchaser may submit a Refund Request themselves.
+
+**Refund Eligibility**:
+The conditions under which a Purchaser may submit a Refund Request themselves: within the Refund Window, below the progress limits, no Redeemed seats, and no earlier Issued Refund for that Course.
+
+**Read-only Access**:
+Content Access limited to Lessons the Student has already Completed, with no new Lesson Progress, Quiz Attempts, Discussion comments, or Ratings. It applies while a Refund affecting the Student's Enrollment is in progress.
+_Avoid_: Frozen, Suspended.
+
+**Revoked Enrollment**:
+An Enrollment whose Content Access ended because a Refund was Issued. Its Lesson Progress is kept so the Enrollment can be restored.
+_Avoid_: Cancelled Enrollment, Deleted Enrollment.
+
+**Refund Override**:
+An Admin's approval of a refund that the Refund Eligibility rules would not allow, either by approving a Declined Refund Request or by creating one on the Purchaser's behalf. It waives only the Refund Window.
+_Avoid_: Manual Refund, Exception.
+
+**Refundable Seat**:
+A Seat in a Team Purchase that is not Redeemed, or whose holder is below the progress limits for its Course.
+
 **Chargeback**:
 A payment dispute raised by a cardholder through their bank or card issuer, distinct from a Refund Request made to the course provider.
 _Avoid_: Chargeback as a name for a Refund Request or a Refund.
