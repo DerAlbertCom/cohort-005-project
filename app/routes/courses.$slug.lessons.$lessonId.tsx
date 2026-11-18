@@ -8,6 +8,7 @@ import {
   type CourseRef,
 } from "~/modules/permissions/course-permissions.server";
 import { lessonViewer } from "~/modules/lesson-viewer/index.server";
+import { quizSubmissionSchema } from "~/modules/lesson-viewer";
 import {
   createComment,
   deleteComment,
@@ -247,8 +248,18 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   if (intent === "submit-quiz") {
+    const submission = quizSubmissionSchema.safeParse(
+      Object.fromEntries(formData)
+    );
+    if (!submission.success) {
+      throw data("Invalid quiz ID", { status: 400 });
+    }
     return {
-      quizResult: lessonViewer.submitQuiz(currentUserId, lessonId, formData),
+      quizResult: lessonViewer.submitQuiz(
+        currentUserId,
+        lessonId,
+        submission.data
+      ),
     };
   }
 

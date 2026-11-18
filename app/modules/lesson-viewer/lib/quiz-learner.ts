@@ -8,6 +8,7 @@ import {
   getQuizByLessonId,
   getQuizWithQuestions,
 } from "./quiz";
+import type { QuizSubmission } from "./quiz-submission";
 
 export type LearnerQuiz = {
   id: number;
@@ -58,19 +59,12 @@ export function getQuizForLearner(
   return { quiz, bestAttempt };
 }
 
-/**
- * Scores a submitted quiz form: `quizId`, plus `question-{id}` = option id.
- * Throws a 400 for a malformed quiz id, a 404 for a quiz outside this lesson.
- */
+/** Scores a parsed quiz submission. Throws a 404 for a quiz outside this lesson. */
 export function submitQuiz(
   database: Db,
-  submission: { userId: number; lessonId: number; formData: FormData }
+  submission: { userId: number; lessonId: number } & QuizSubmission
 ) {
-  const { userId, lessonId, formData } = submission;
-  const quizId = Number(formData.get("quizId"));
-  if (isNaN(quizId)) {
-    throw data("Invalid quiz ID", { status: 400 });
-  }
+  const { userId, lessonId, quizId, selectedAnswers } = submission;
   // Scope the quiz to this lesson so a quiz elsewhere can't be reached by
   // posting its id to this route.
   const quiz = database
@@ -80,17 +74,6 @@ export function submitQuiz(
     .get();
   if (!quiz || quiz.lessonId !== lessonId) {
     throw data("Quiz not found", { status: 404 });
-  }
-
-  const selectedAnswers: Record<number, number> = {};
-  for (const [key, value] of formData.entries()) {
-    if (key.startsWith("question-")) {
-      const questionId = Number(key.replace("question-", ""));
-      const optionId = Number(value);
-      if (!isNaN(questionId) && !isNaN(optionId)) {
-        selectedAnswers[questionId] = optionId;
-      }
-    }
   }
 
   const result = computeResult(database, {

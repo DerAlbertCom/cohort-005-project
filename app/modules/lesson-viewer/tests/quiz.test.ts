@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { quizSubmissionSchema } from "../index";
 import {
   addLesson,
   addModule,
@@ -147,18 +148,20 @@ describe("submitQuiz", () => {
     );
   });
 
-  it("refuses a malformed quiz id with a 400", () => {
-    expect(() =>
-      world.viewer.submitQuiz(
-        world.base.user.id,
-        lessonId,
-        quizForm({ quizId: "abc" })
-      )
-    ).toThrow(
-      expect.objectContaining({
-        data: "Invalid quiz ID",
-        init: expect.objectContaining({ status: 400 }),
-      })
-    );
+  it.each(["abc", "", "0", "1.5"])(
+    "rejects the malformed quiz id %j before it reaches a query",
+    (quizId) => {
+      expect(quizSubmissionSchema.safeParse({ quizId }).success).toBe(false);
+    }
+  );
+
+  it("drops answers whose option id is not an id", () => {
+    const submission = quizSubmissionSchema.parse({
+      quizId: "7",
+      "question-3": "abc",
+      "question-4": "",
+      "question-5": "12",
+    });
+    expect(submission).toEqual({ quizId: 7, selectedAnswers: { 5: 12 } });
   });
 });

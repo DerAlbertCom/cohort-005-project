@@ -3,6 +3,7 @@ import * as schema from "~/db/schema";
 import { QuestionType } from "~/db/schema";
 import { markdown } from "~/lib/text";
 import { createLessonViewer, type LessonPageRequest } from "../index.server";
+import { quizSubmissionSchema } from "../index";
 
 export const NOW = new Date("2026-10-06T12:00:00.000Z");
 
@@ -100,12 +101,13 @@ export function addQuiz(db: TestDb, lessonId: number) {
   return { id: quiz.id, multipleChoice, trueFalse };
 }
 
+/** A quiz form as the browser posts it, parsed the way the route parses it. */
 export function quizForm(fields: Record<string, string | number>) {
-  const form = new FormData();
-  for (const [name, value] of Object.entries(fields)) {
-    form.set(name, String(value));
-  }
-  return form;
+  return quizSubmissionSchema.parse(
+    Object.fromEntries(
+      Object.entries(fields).map(([name, value]) => [name, String(value)])
+    )
+  );
 }
 
 export function pageRequest(
