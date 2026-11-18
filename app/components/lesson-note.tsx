@@ -16,12 +16,13 @@ export function LessonNote({
   note: { body: string; updatedAt: string } | null;
 }) {
   const fetcher = useFetcher<{ ok: boolean; error?: string }>();
-  const [body, setBody] = useState(note?.body ?? "");
+  const savedBody = note?.body ?? null;
+  const [body, setBody] = useState(savedBody ?? "");
   const isSaving = fetcher.state !== "idle";
   const error = fetcher.data?.error;
   const draft = describeNoteDraft({
     draft: body,
-    savedBody: note?.body ?? null,
+    savedBody,
     maxLength: MAX_NOTE_LENGTH,
   });
 
