@@ -73,4 +73,25 @@ describe("describeNoteDraft", () => {
     expect(draft.tooLong).toBe(true);
     expect(draft.canSave).toBe(false);
   });
+
+  it("treats a draft that only adds surrounding whitespace as unchanged", () => {
+    const draft = describeNoteDraft({
+      draft: "same \n",
+      savedBody: "same",
+      maxLength,
+    });
+    expect(draft.unchanged).toBe(true);
+    expect(draft.canSave).toBe(false);
+  });
+
+  it("does not count surrounding whitespace against the limit", () => {
+    const draft = describeNoteDraft({
+      draft: ` ${"a".repeat(maxLength)} `,
+      savedBody: null,
+      maxLength,
+    });
+    expect(draft.length).toBe(maxLength);
+    expect(draft.tooLong).toBe(false);
+    expect(draft.canSave).toBe(true);
+  });
 });
