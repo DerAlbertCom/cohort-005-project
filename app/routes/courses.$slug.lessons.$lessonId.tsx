@@ -46,6 +46,16 @@ const saveNoteSchema = z.object({
     ),
 });
 
+const lessonParamsSchema = z.object({
+  lessonId: z.coerce.number().int().positive(),
+});
+
+function parseLessonId(params: { lessonId: string }): number {
+  const parsed = lessonParamsSchema.safeParse(params);
+  if (!parsed.success) throw data("Lesson not found", { status: 404 });
+  return parsed.data.lessonId;
+}
+
 const deleteCommentSchema = z.object({
   intent: z.literal("delete-comment"),
   commentId: z.coerce.number().int(),
@@ -95,7 +105,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   const page = await lessonViewer.lessonPage({
     courseId: course.id,
     instructorId: course.instructorId,
-    lessonId: Number(params.lessonId),
+    lessonId: parseLessonId(params),
     currentUserId: person?.id ?? null,
     enrolled,
     view,
@@ -127,7 +137,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     ref
   );
   const currentUserId = person.id;
-  const lessonId = Number(params.lessonId);
+  const lessonId = parseLessonId(params);
 
   if (
     intent === "create-comment" ||
