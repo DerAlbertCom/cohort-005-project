@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-const ANSWER_FIELD = /^question-(\d+)$/;
 const optionIdSchema = z.coerce.number().int().positive();
 
 export type QuizSubmission = {
@@ -20,7 +19,7 @@ export const quizSubmissionSchema = z
   .transform(({ quizId, ...fields }): QuizSubmission => {
     const selectedAnswers: Record<number, number> = {};
     for (const [name, value] of Object.entries(fields)) {
-      const questionId = ANSWER_FIELD.exec(name)?.[1];
+      const questionId = /^question-(\d+)$/.exec(name)?.[1];
       const optionId = optionIdSchema.safeParse(value);
       if (questionId && optionId.success) {
         selectedAnswers[Number(questionId)] = optionId.data;

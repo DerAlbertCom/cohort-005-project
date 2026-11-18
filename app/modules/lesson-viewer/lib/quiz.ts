@@ -5,7 +5,6 @@ import {
   quizOptions,
   quizQuestions,
   quizzes,
-  QuestionType,
 } from "~/db/schema";
 import type { Db } from "./db";
 
@@ -32,19 +31,16 @@ export function getQuizWithQuestions(database: Db, quizId: number) {
     .orderBy(quizQuestions.position)
     .all();
 
-  const options =
-    questions.length === 0
-      ? []
-      : database
-          .select()
-          .from(quizOptions)
-          .where(
-            inArray(
-              quizOptions.questionId,
-              questions.map((q) => q.id)
-            )
-          )
-          .all();
+  const options = database
+    .select()
+    .from(quizOptions)
+    .where(
+      inArray(
+        quizOptions.questionId,
+        questions.map((q) => q.id)
+      )
+    )
+    .all();
   const questionsWithOptions = questions.map((question) => ({
     ...question,
     options: options.filter((o) => o.questionId === question.id),
@@ -84,29 +80,27 @@ export type QuizResult = NonNullable<ReturnType<typeof computeResult>>;
 
 type QuizQuestion = typeof quizQuestions.$inferSelect;
 
-const GRADED_TYPES: readonly string[] = [
-  QuestionType.MultipleChoice,
-  QuestionType.TrueFalse,
-];
-
-/** Question id to its correct option id, in one query for the whole quiz. */
+/**
+ * Question id to its correct option id, in one query for the whole quiz.
+ * Quiz authoring does not stop an instructor marking two options correct;
+ * the first one written is the one that counts.
+ */
 function correctOptionIds(database: Db, questions: QuizQuestion[]) {
-  const graded = questions
-    .filter((q) => GRADED_TYPES.includes(q.questionType))
-    .map((q) => q.id);
-  const correct = new Map<number, number>();
-  if (graded.length === 0) return correct;
   const rows = database
     .select({ id: quizOptions.id, questionId: quizOptions.questionId })
     .from(quizOptions)
     .where(
       and(
-        inArray(quizOptions.questionId, graded),
+        inArray(
+          quizOptions.questionId,
+          questions.map((q) => q.id)
+        ),
         eq(quizOptions.isCorrect, true)
       )
     )
     .orderBy(quizOptions.id)
     .all();
+  const correct = new Map<number, number>();
   for (const row of rows) {
     if (!correct.has(row.questionId)) correct.set(row.questionId, row.id);
   }

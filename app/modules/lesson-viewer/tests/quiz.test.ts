@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import * as schema from "~/db/schema";
 import { quizSubmissionSchema } from "../index";
 import {
   addLesson,
@@ -155,13 +156,36 @@ describe("submitQuiz", () => {
     }
   );
 
-  it("drops answers whose option id is not an id", () => {
+  it("keeps only question-{id} fields whose value is an option id", () => {
     const submission = quizSubmissionSchema.parse({
       quizId: "7",
+      intent: "1",
       "question-3": "abc",
       "question-4": "",
       "question-5": "12",
+      "question-6x": "13",
+      "my-question-8": "14",
     });
-    expect(submission).toEqual({ quizId: 7, selectedAnswers: { 5: 12 } });
+    expect(submission).toStrictEqual({
+      quizId: 7,
+      selectedAnswers: { 5: 12 },
+    });
+  });
+
+  it("counts the first correct option when two are marked correct", () => {
+    const secondRight = world.db
+      .insert(schema.quizOptions)
+      .values({
+        questionId: quiz.trueFalse.id,
+        optionText: "Also right",
+        isCorrect: true,
+      })
+      .returning()
+      .get().id;
+    const result = submit({ [`question-${quiz.trueFalse.id}`]: secondRight });
+    expect(result.questionResults[1]).toMatchObject({
+      correct: false,
+      correctOptionId: quiz.trueFalse.right,
+    });
   });
 });
