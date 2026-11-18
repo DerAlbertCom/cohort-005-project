@@ -85,7 +85,6 @@ export function FullLesson({ data }: { data: FullLessonPage }) {
   const isCompleted =
     lessonStatus === LessonProgressStatus.Completed || justCompleted;
 
-  // Navigate to next lesson after marking complete
   useEffect(() => {
     if (justCompleted && nextLesson) {
       navigate(`/courses/${course.slug}/lessons/${nextLesson.id}`);
@@ -97,7 +96,6 @@ export function FullLesson({ data }: { data: FullLessonPage }) {
 
   return (
     <div className="flex">
-      {/* Curriculum Sidebar */}
       <CurriculumSidebar
         course={course}
         curriculum={curriculum}
@@ -114,7 +112,6 @@ export function FullLesson({ data }: { data: FullLessonPage }) {
         />
 
         <div className="mx-auto max-w-4xl">
-          {/* Lesson Title */}
           <div className="mb-2 flex items-start justify-between gap-3">
             <h1 className="text-3xl font-bold">{lesson.title}</h1>
             {currentUserId && <BookmarkToggle bookmarked={bookmarked} />}
@@ -140,7 +137,6 @@ export function FullLesson({ data }: { data: FullLessonPage }) {
             )}
           </div>
 
-          {/* YouTube Video */}
           {lesson.videoUrl && (
             <YouTubePlayer
               videoUrl={lesson.videoUrl}
@@ -158,7 +154,6 @@ export function FullLesson({ data }: { data: FullLessonPage }) {
           {/* Note — under the video, so the Student can write while they watch */}
           {currentUserId && <LessonNote key={lesson.id} note={note} />}
 
-          {/* Lesson Content */}
           {contentHtml && (
             <div
               className="prose prose-neutral dark:prose-invert mb-8 max-w-none"
@@ -175,7 +170,6 @@ export function FullLesson({ data }: { data: FullLessonPage }) {
             </Card>
           )}
 
-          {/* Quiz Section */}
           {quiz && enrolled && currentUserId && (
             <QuizSection
               quiz={quiz}
@@ -186,7 +180,6 @@ export function FullLesson({ data }: { data: FullLessonPage }) {
             />
           )}
 
-          {/* Mark Complete / Up Next */}
           {enrolled && currentUserId && (
             <div className="mb-8">
               {isCompleted ? (
@@ -241,7 +234,6 @@ export function FullLesson({ data }: { data: FullLessonPage }) {
             instructorName={instructorName}
           />
 
-          {/* Prev/Next Navigation */}
           <div className="flex items-center justify-between border-t pt-6">
             {prevLesson ? (
               <Link
